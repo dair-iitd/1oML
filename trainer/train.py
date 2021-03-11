@@ -180,7 +180,7 @@ data_gen_group.add_argument('--hot-data-sampling', type=str,
 data_gen_group.add_argument('--warmup-data-sampling', type=str,
                             default="rs", help="data sampling strategy when in warmup phase",
                             choices=['unique','ambiguous','one-one',
-                             'two-one','three-one','four-one','rs'])
+                             'two-one','three-one','four-one','rs','rsxy'])
 
 train_group = parser.add_argument_group('Train')
 
@@ -322,7 +322,7 @@ schedule_group.add_argument(
 schedule_group.add_argument(
     '--test-interval',
     type=int,
-    default=None,
+    default=1,
     metavar='N',
     help='the interval(number of epochs) to do test')
 
@@ -1090,7 +1090,7 @@ def main():
         skip_warmup = args.skip_warmup
 
     my_lr_scheduler = scheduler.CustomReduceLROnPlateau(trainer._optimizer, {'mode': 'min', 'factor': 0.2, 'patience': math.ceil(
-        7/args.test_interval), 'verbose': True, 'threshold': 0.01, 'threshold_mode': 'rel', 'cooldown': 0, 'min_lr': 0.01*args.lr, 'eps': 0.0000001}, maxPatienceToStopTraining=math.ceil(20/args.test_interval))
+        7/args.test_interval), 'verbose': True, 'threshold': 0.0001, 'threshold_mode': 'rel', 'cooldown': 0, 'min_lr': 0.01*args.lr, 'eps': 0.0000001}, maxPatienceToStopTraining=math.ceil(20/args.test_interval))
     
     trainer.my_lr_scheduler = my_lr_scheduler
     
