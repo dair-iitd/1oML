@@ -2,9 +2,20 @@
 from torch.optim import lr_scheduler
 
 #modified from - https://pytorch.org/docs/0.3.1/_modules/torch/optim/lr_scheduler.html#ReduceLROnPlateau
+import math
 
 from jacinle.logging import get_logger, set_output_file
 logger = get_logger(__file__)
+
+def get_scheduler(args, optimizer):
+    my_lr_scheduler = CustomReduceLROnPlateau(optimizer, {'mode': 'min', 'factor': 0.2, 'patience': math.ceil(
+        7/args.test_interval), 'verbose': True, 
+        'threshold': 0.0001, 'threshold_mode': 'rel', 
+        'cooldown': 0, 'min_lr': 0.01*args.lr, 
+        'eps': 0.0000001}, maxPatienceToStopTraining=math.ceil(20/args.test_interval))
+
+    return my_lr_scheduler
+
 
 class FlagOnPlateau():
     def __init__(self, mode='min', patience=3,

@@ -62,7 +62,13 @@ parser.add_argument('--solution-count', type=int, default=5,
 parser.add_argument(
     '--model',
     default='nlm',
-    choices=['nlm', 'rrn'],
+    choices=['nlm', 'rrn', 'lstm_encoder_decoder_sudoku', 'transformer_encoder_decoder_sudoku',
+        't5_encoder_decoder_sudoku',
+        't5_encoder_sudoku',
+        't5v2_encoder_decoder_sudoku',
+        't5v3_encoder_decoder_sudoku',
+        'gpt_encoder_sudoku',
+        'gpt_encoder_decoder_sudoku'],
     help='model choices, nlm: Neural Logic Machine')
 
 # NLM parameters, works when model is 'nlm'
@@ -133,6 +139,19 @@ rrn_group.add_argument('--sudoku-hidden-dim', type=int,
 rrn_group.add_argument('--sudoku-do', type=float, default=0.1,
                        metavar='N', help='dropout for msg passing')
 
+rrn_group.add_argument('--sudoku-attention-mask', type=int, default=0,
+                       metavar='N', help='should assume sudoku attention mask when training gpt?')
+rrn_group.add_argument('--share-decoder-weights', type=int,
+                       default=1, metavar='N', help='in t5 model, should decoder wts be shared?')
+rrn_group.add_argument('--share-encoder-weights', type=int,
+                       default=0, metavar='N', help='in t5 model, should encoder wts be shared?')
+
+rrn_group.add_argument('--loss-on-encoder', type=int,
+                       default=0, metavar='N', help='should compute loss using encoder logits?')
+
+rrn_group.add_argument('--is-encoder-decoder', type=int,
+                       default=0, metavar='N', help='is it an encoder decoder model?')
+
 # task related
 
 task_group = parser.add_argument_group('Task')
@@ -199,6 +218,13 @@ train_group.add_argument(
     default='AdamW',
     choices=['SGD', 'Adam', 'AdamW'],
     help='optimizer choices')
+
+train_group.add_argument(
+    '--get-optim-from-model',
+    type=int,
+    default=0,
+    help='should ask model class to create an optimizer? required for gpt')
+
 
 train_group.add_argument(
     '--lr',
@@ -538,8 +564,8 @@ def get_log_prob_from_dis(dis2):
 def get_prob_from_dis(dis2):
     eps = 0.00001
     if args.latent_model == 'eg':
-        return dis2
-    return F.softmax(-1.0*dis2, dim=0)
+        return dis2, torch.log(dis2)
+    return F.softmax(-1.0*dis2, dim=0), F.log_softmax(-1.0*dis2, dim=0)
 
 def rl_sampling(weights):
     # give weights 1-eps and eps respectively to top2 indices
@@ -614,13 +640,16 @@ class MyTrainer(TrainerBase):
             loss, monitors, output_dict = self._model(feed_dict)
         else:
             if args.no_static:
+                #in no_static scenario, this is for both sampling probabilities and reward.
+                #but if latent model is not trainable, we don't need reward and hence setting for_reward to False
+                for_reward = self.args.latent_model not in ['det', 'eg']
                 loss, monitors, output_dict = self._model(
-                    feed_dict, return_loss_matrix=True)
+                    feed_dict, return_loss_matrix=True, for_reward = for_reward)
                 y_hat = output_dict['pred'].detach()
             else:
                 with torch.no_grad():
                     #y_hat = self._static_model(feed_dict)['pred'].detach()
-                    static_model_output = self._static_model(feed_dict, return_loss_matrix=True)
+                    static_model_output = self._static_model(feed_dict, return_loss_matrix=True, for_reward=True)
                     if isinstance(static_model_output, dict):
                         y_hat = static_model_output['pred'].detach()
                         output_dict = static_model_output
@@ -636,12 +665,24 @@ class MyTrainer(TrainerBase):
                 if key in feed_dict:
                     expanded_feed_dict[key] = expand_tensor(
                         feed_dict[key], feed_dict["count"])
-            #
+           
+            #print("expanded query:\n", expanded_feed_dict['query']) 
+            #print("expanded count:\n", expanded_feed_dict['query']) 
+            
+            #print("original  query:\n", expanded_feed_dict['query']) 
+            
+            #Pdb().set_trace() 
             #unravel target set to obtain different targets
             expanded_feed_dict["target"] = unravel_tensor(
                 feed_dict["target_set"], feed_dict["count"])
-            # copy interemediate y for each target
-            y_hat = expand_tensor(y_hat, feed_dict["count"])
+            
+            
+            # copy interemediate y for each target. need not do it only for encoder decoder
+            #print("y_hat before expansion: ", y_hat.shape)
+            if not (y_hat.shape[0] == feed_dict['count'].sum()): 
+                #Pdb().set_trace()
+                y_hat = expand_tensor(y_hat, feed_dict["count"])
+            #print("y_hat after expansion: ", y_hat.shape)
 
             # inserting detached loss in the expanded_feed_dict for deterministic latent model
             #Pdb().set_trace()
@@ -650,6 +691,8 @@ class MyTrainer(TrainerBase):
                 if args.latent_model == 'eg':
                     expanded_feed_dict['minloss_eg_prob'] = unravel_minloss_epsilon_greedy(output_dict['loss_matrix'], feed_dict['count'],args.minloss_eg_eps).detach()
             # compute latent variable, i.e. the scores for each of the possible targets
+            
+            #Pdb().set_trace()
             z_latent = self._latent_model(
                 expanded_feed_dict, y_hat,output_dict)['latent_z']
 
@@ -663,14 +706,19 @@ class MyTrainer(TrainerBase):
             action_prob = []
             #rl_weights = []
             weights = []
-
+            log_softmax = []
             # loop over each query
             for s, e in zip(start_index, end_index):
                 dis2 = z_latent[s:e].squeeze(1)
-                probs = get_prob_from_dis(dis2)
+                probs, log_probs = get_prob_from_dis(dis2)
+                #print("Dist:\n", dis2)
+                #print("Probs:\n", probs)
                 weights.append(F.pad(
                     probs, (0, feed_dict['target_set'].size(1) - probs.size(0)), "constant", 0))
+                log_softmax.append(F.pad(
+                    log_probs, (0, feed_dict['target_set'].size(1) - probs.size(0)), "constant", 0))
             #
+            #Pdb().set_trace()
             selected_feed_dict = feed_dict
             if args.rl_exploration:
                 selected_feed_dict["weights"] = rl_sampling(torch.stack(weights).detach().clone())
@@ -678,10 +726,30 @@ class MyTrainer(TrainerBase):
                 selected_feed_dict["weights"] = torch.stack(weights).detach().clone()
                     
             loss = 0
-            if not args.no_static:
-                # Pdb().set_trace()
-                loss, monitors, output_dict = self._model(selected_feed_dict)
+            #Pdb().set_trace()
+            for_reward = self.args.latent_model not in ['det', 'eg']
+            if (not args.no_static) or (self._model.is_encoder_decoder):
+                # Pdb().set_trace() 
+                if args.is_encoder_decoder: 
+                    if args.no_static: 
+                        # M_{theta_} is same as M_{theta} and hence no need to do inference
+                        # note that we do not overwrite output_dict that has already been obtained while running inference using M_{theta_}
+                        
+                        # if for_reward is False, i.e. latent_model is not learnable, then we would have computed the loss while computing the sampling probabilities
+                        if for_reward:
+                            loss, monitors, _ = self._model(selected_feed_dict)
+                        else:
+                            #we have already computed loss while computing exploration probabilities
+                            loss = (output_dict['loss_matrix']*selected_feed_dict['weights']
+                                ).sum()/selected_feed_dict['weights'].sum()
+
+                    else:
+                        # here we need to first do inference to compute reward and then forward pass to compute loss
+                        raise
+                else: 
+                    loss, monitors, output_dict = self._model(selected_feed_dict)
             else:
+                #Pdb().set_trace()
                 loss = (output_dict['loss_matrix']*selected_feed_dict['weights']
                             ).sum()/selected_feed_dict['weights'].sum()
 
@@ -692,7 +760,12 @@ class MyTrainer(TrainerBase):
                     #avg_reward = (output_dict['reward']*(feed_dict['mask'].float())).sum()/(feed_dict['mask'].sum().float())
                     rewards = (output_dict['reward'] -
                            avg_reward)*(feed_dict['mask'].float())
-                    rl_loss = -1.0*(rewards*torch.stack(weights)).sum()/feed_dict['is_ambiguous'].sum()
+                    #print("Rewards:\n", rewards)
+                    
+                    stacked_exploration_probs = torch.stack(weights)
+                    #print("Exploration probs:\n", stacked_exploration_probs)
+                    rl_loss = -1.0*(rewards*stacked_exploration_probs).sum()/feed_dict['is_ambiguous'].sum()
+                    #rl_loss = -1.0*(rewards*selected_feed_dict['weights']*torch.stack(log_softmax)).sum()/feed_dict['is_ambiguous'].sum()
                 else:
                     #use selected_feed_dict['weights']. rewards should be only for non zero samples. 
                     #Also, now we use REINFORCE : maximize : reward*log(p_action)
@@ -752,6 +825,7 @@ class MyTrainer(TrainerBase):
         if self.mode in ['hot']:
             lgrad_norm_before_clip, lgrad_norm_after_clip, lparam_norm_before_clip = utils.gradient_normalization(
                 self._latent_model, grad_norm=args.grad_clip)
+            monitors_f['gr_loss_rl'] = lgrad_norm_before_clip 
             self._latent_optimizer.step()
 
         glogger.info(','.join(map(lambda x: str(round(x, 6)), [self.current_epoch, self.num_iters, loss_f, loss_latent_f, grad_norm_before_clip, grad_norm_after_clip, param_norm_before_clip,lgrad_norm_before_clip, lgrad_norm_after_clip, lparam_norm_before_clip ])))
@@ -829,7 +903,6 @@ class MyTrainer(TrainerBase):
                     if not args.no_static:
                         static_model.load_state_dict(
                             checkpoint["static_model"])
-
                 self._optimizer.load_state_dict(checkpoint['optimizer'])
                 logger.critical('Checkpoint loaded: {}.'.format(filename))
                 return checkpoint['extra']
@@ -994,19 +1067,19 @@ class MyTrainer(TrainerBase):
                     self.save_checkpoint("best")
         return meters, test_meters
 
-         
 
 
     def train(self, start_epoch=1, num_epochs=0):
         meters = None
-
         for i in range(start_epoch, start_epoch + num_epochs):
             self.current_epoch = i
             meters, test_meters = self._train_epoch(
                 self.epoch_size, (self.current_epoch == (start_epoch + num_epochs-1)))
 
             if args.reduce_lr and test_meters is not None:
+                #TODO changed to pointwise accuracy for lstm sudoku
                 metric = test_meters[0].avg["corrected accuracy"]
+                #metric = test_meters[0].avg["pointwise accuracy"]
                 self.my_lr_scheduler.step(1.0-1.0*metric)
                 if self.my_lr_scheduler.shouldStopTraining():
                     logger.info("Stop training as no improvement in accuracy - no of unconstrainedBadEopchs: {0} > {1}".format(
@@ -1070,11 +1143,15 @@ def main():
     if args.use_gpu:
         model.cuda()
 
-    optimizer = get_optimizer(args.optimizer, model,
+    if args.get_optim_from_model == 1:
+        optimizer = model.get_optimizer(args)
+    else:
+        optimizer = get_optimizer(args.optimizer, model,
                               args.lr, weight_decay=args.wt_decay)
 
 
     trainer = MyTrainer.from_args(model, optimizer, args)
+    trainer.args = args
     trainer.num_iters = 0
     trainer.num_bad_updates = 0
     trainer.test_batch_size = args.test_batch_size
@@ -1083,14 +1160,17 @@ def main():
     trainer._latent_model = None
     trainer._static_model = None
 
-    skip_warmup = False
+
+
+    #skip_warmup = False
+    skip_warmup =args.skip_warmup 
     if args.load_checkpoint is not None:
         extra = trainer.load_checkpoint(args.load_checkpoint)
         #skip_warmup = extra is not None and (extra['name'] == 'last_warmup')
         skip_warmup = args.skip_warmup
 
-    my_lr_scheduler = scheduler.CustomReduceLROnPlateau(trainer._optimizer, {'mode': 'min', 'factor': 0.2, 'patience': math.ceil(
-        7/args.test_interval), 'verbose': True, 'threshold': 0.0001, 'threshold_mode': 'rel', 'cooldown': 0, 'min_lr': 0.01*args.lr, 'eps': 0.0000001}, maxPatienceToStopTraining=math.ceil(20/args.test_interval))
+    #my_lr_scheduler = scheduler.CustomReduceLROnPlateau(trainer._optimizer, {'mode': 'min', 'factor': 0.2, 'patience': math.ceil(
+    my_lr_scheduler = scheduler.get_scheduler(args, trainer._optimizer)
     
     trainer.my_lr_scheduler = my_lr_scheduler
     
@@ -1133,6 +1213,7 @@ def main():
         trainer._latent_model.train()
         if not args.no_static:
             trainer._static_model = copy.deepcopy(trainer._model)
+        
         trainer._latent_optimizer = get_optimizer(
             args.optimizer, trainer._latent_model, args.lr_latent, weight_decay=args.latent_wt_decay)
 
@@ -1155,7 +1236,9 @@ def main():
             my_lr_scheduler.maxPatienceToStopTraining = 10000
             for x in trainer._optimizer.param_groups:
                 x['lr'] = 0.0
+            print("Start pretraining of phi")
             _ = trainer.train(args.warmup_epochs+1, args.pretrain_phi)
+            print("End pretraining of phi")
         
         trainer.best_accuracy = -1
 

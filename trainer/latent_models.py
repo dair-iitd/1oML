@@ -36,6 +36,7 @@ from difflogic.nn.neural_logic import LogicMachine, LogicInference, LogitsInfere
 from difflogic.nn.neural_logic.modules._utils import meshgrid_exclude_self
 from difflogic.thutils_rl import binary_accuracy, instance_accuracy
 from difflogic.train import TrainerBase
+from IPython.core.debugger import Pdb
 
 logger = get_logger(__file__)
 
@@ -45,8 +46,13 @@ class SudokuConvNet(nn.Module):
         self.args = args
 
         self.layers = [100,64,32,32] 
+        num_input_channels = self.args.sudoku_num_steps
+        if (self.args.is_encoder_decoder) and (self.args.loss_on_encoder):
+            num_input_channels = 2*num_input_channels
+
+
         self.add_module("conv_0", nn.Conv2d(
-            32, self.layers[0], kernel_size=3, padding=1))
+            num_input_channels, self.layers[0], kernel_size=3, padding=1))
         for i in range(1, len(self.layers)):
             self.add_module("conv_{}".format(i), nn.Conv2d(
                 self.layers[i-1], self.layers[i], kernel_size=3, padding=1))
@@ -61,19 +67,26 @@ class SudokuConvNet(nn.Module):
     def forward(self, feed_dict, y_hat, additional_info=None):
         feed_dict = GView(feed_dict)
         target = feed_dict["target"].long()
+        sudoku_num_steps= y_hat.shape[-1]
         # y_hat has shape exp_batch_size x 10 x 81 x num_steps
         # x has shape exp_batch_size x 81 x num_steps
+        #Pdb().set_trace()
         x = y_hat.argmax(dim=1).long()
         x = (x == target.unsqueeze(-1).expand(len(y_hat),
-                                        81, self.args.sudoku_num_steps)).float()
+                                        81, sudoku_num_steps)).float()
 
+
+        #print("error at last layer", x[:,:,-1].sum(dim=-1))
+        #print("count: ", feed_dict['count'])
         # shuffle dimensions to make it exp_batch_size x num_steps x 81
         # reshape it to exp_batch_size x num_steps x 9 x 9
-        x = x.transpose(1, 2).view(-1, self.args.sudoku_num_steps, 9, 9)
+        x = x.transpose(1, 2).view(-1, sudoku_num_steps, 9, 9)
 
+        #Pdb().set_trace()
         for i in range(len(self.layers)+1):
-            x = torch.relu(self._modules["conv_{}".format(i)](x))
+            x = torch.nn.functional.gelu(self._modules["conv_{}".format(i)](x))
         x = x.view(-1, 81)
+        #print("min x: ", x.min(), "max x: ", x.max())
         return {'latent_z': self.linear(x)}
 
 

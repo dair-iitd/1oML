@@ -107,7 +107,7 @@ def is_safe_sudoku(x, n):
     return True
 
 
-def instance_accuracy(label, raw_pred, return_float=True, feed_dict=None, task='nqueens', args=None):
+def instance_accuracy(label, raw_pred, return_float=True, feed_dict=None, task='nqueens', args=None, inputs=None):
     with torch.no_grad():
         def compare_func_futo(x, query): return match_query(
             query[:, 0].float(), x) and is_safe_futoshiki(x, query[:, 1:])
@@ -123,10 +123,99 @@ def instance_accuracy(label, raw_pred, return_float=True, feed_dict=None, task='
         elif task == 'sudoku':
             compare_func = compare_func_sudoku
         #
-        return _instance_accuracy(label, raw_pred, compare_func, return_float, feed_dict, args)
+        if (args.is_encoder_decoder) and (inputs is not None) and (feed_dict['target_set'].shape[0] != raw_pred.shape[0]): 
+            return _instance_accuracy_encoder_decoder(label, raw_pred, compare_func, return_float, feed_dict, args, inputs=inputs)
+        else:
+            return _instance_accuracy(label, raw_pred, compare_func, return_float, feed_dict, args, inputs=inputs)
+
+def _instance_accuracy_encoder_decoder(label, raw_pred, compare_func, return_float=True, feed_dict=None, args=None, inputs=None):
+    """get instance-wise accuracy for structured prediction task instead of pointwise task"""
+    # disctretize output predictions
+    if not args.task_is_sudoku:
+        pred = as_tensor(raw_pred)
+        pred = (pred > 0.5).float()
+    else:
+        step_pred = as_tensor(raw_pred.argmax(dim=1)).float()
+        pred = step_pred[:, :, -1]
+
+        # step pred is batch_size x 81 x num_steps
+        # transpose for more efficient reward calculation
+        # new shape is batch_size x num_Steps x 81
+        step_pred = step_pred.transpose(1, 2)
+
+    label = as_tensor(label).type(pred.dtype)
+
+    diff = (label == pred)
+    point_acc = torch.sum(diff).float()/label.numel()
+    incorrect = torch.min(diff, dim=1)[0]
+    in_acc = torch.sum(incorrect).float()/len(label)
+
+    errors = []
+    corrected_acc = 0
+    reward = []
+    acc_vector = []
+    for i, x in enumerate(pred):
+        this_input = inputs[i].type(x.dtype)
+        if compare_func(x, this_input):
+            corrected_acc += 1
+            acc_vector.append(1)
+        else:
+            acc_vector.append(0)
+        if args.task_is_sudoku:
+            #TODO compute reward fn for enocder decoder. Adding dummy reward 0 
+            # reward computation can happen only in inference when yhat is computed without teacher forcing
+            #reward.append(torch.tensor(0.0))
+            
+            # if args.use_gpu:
+            #    diff = torch.zeros(len(feed_dict['target_set'][i]),step_pred.shape[1], device=torch.device("cuda"))
+            # else:
+            #    diff = torch.zeros(len(feed_dict['target_set'][i]),step_pred.shape[1]).cuda()
+            # for target_idx,target in enumerate(feed_dict['target_set'][i,:feed_dict['count'][i]].float()):
+            #    diff[target_idx] = torch.sum(~(step_pred[i]==target), dim=1).float()
+            # for target_idx in range(feed_dict['count'][i],diff.shape[0]):
+            #    diff[target_idx] = diff[target_idx-1]
+            #
+            # alternative tensor way
+            if feed_dict['target_set'].shape[0] == inputs.shape[0]: 
+                NS, NN, TS = step_pred.size(1), step_pred.size(
+                    2), feed_dict['target_set'].size(1)
+                diff = (step_pred[i].unsqueeze(-1).expand(NS, NN, TS).transpose(0, 2).float() !=
+                        feed_dict['target_set'][i].unsqueeze(-1).expand(TS, NN, NS).float()).sum(dim=1).float()
+
+                if args.rl_reward == 'count':
+                    reward.append(diff.mean(dim=1))
+                else:
+                    reward.append(torch.clamp_max(diff, 1).mean(dim=1))
+        else:
+            raise
+            diff = torch.sum(
+                ~(feed_dict["target_set"][i].type(x.dtype) == x), dim=1).float()
+            if args.rl_reward == 'count':
+                reward.append(diff)
+            else:
+                reward.append(torch.clamp_max(diff, 1))
+    corrected_acc /= len(pred)
+
+    if feed_dict['target_set'].shape[0] == inputs.shape[0]:
+        reward = -torch.stack(reward)
+    else:
+        reward = torch.zeros_like(feed_dict['mask'])
+
+    ##############target_set_accuracy = (reward.max(dim=1)[0] >= 0).float().mean()
+    target_set_accuracy = torch.tensor(0.0)
+    if return_float:
+        return {"accuracy": in_acc.item(),
+                "corrected accuracy": corrected_acc,
+                "pointwise accuracy": point_acc.item(),
+                "target set accuracy": target_set_accuracy.item()}, errors, reward  # , acc_vector
+    return {"accuracy": torch.tensor(in_acc),
+            "corrected accuracy": torch.tensor(corrected_acc),
+            "pointwise accuracy": point_acc,
+            "target set accuracy": target_set_accuracy}, errors, reward
 
 
-def _instance_accuracy(label, raw_pred, compare_func, return_float=True, feed_dict=None, args=None):
+
+def _instance_accuracy(label, raw_pred, compare_func, return_float=True, feed_dict=None, args=None, inputs=None):
     """get instance-wise accuracy for structured prediction task instead of pointwise task"""
     # disctretize output predictions
     if not args.task_is_sudoku:
@@ -154,7 +243,8 @@ def _instance_accuracy(label, raw_pred, compare_func, return_float=True, feed_di
     new_targets = []
     acc_vector = []
     for i, x in enumerate(pred):
-        if compare_func(x, feed_dict['query'][i].type(x.dtype)):
+        input = feed_dict['query'][i].type(x.dtype) if inputs is None else inputs[i].type(x.dtype)
+        if compare_func(x, input):
             corrected_acc += 1
             acc_vector.append(1)
             # check if pred matches any target
