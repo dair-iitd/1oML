@@ -1,6 +1,5 @@
 # Custom Ignore 
 models
-data
 nqueens_models
 sudoku_models
 futo_models
