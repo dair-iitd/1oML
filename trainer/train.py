@@ -62,11 +62,7 @@ parser.add_argument('--solution-count', type=int, default=5,
 parser.add_argument(
     '--model',
     default='nlm',
-    choices=['nlm', 'rrn', 'lstm_encoder_decoder_sudoku', 'transformer_encoder_decoder_sudoku',
-        't5_encoder_decoder_sudoku',
-        't5_encoder_sudoku',
-        't5v2_encoder_decoder_sudoku',
-        't5v3_encoder_decoder_sudoku',
+    choices=['nlm', 'rrn', 
         'gpt_encoder_sudoku',
         'gpt_encoder_decoder_sudoku'],
     help='model choices, nlm: Neural Logic Machine')

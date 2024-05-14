@@ -40,12 +40,6 @@ from difflogic.train import TrainerBase
 
 from rrn.sudoku import SudokuNN
 import rrn.sudoku_data as sd
-from lstm_encoder_decoder_sudoku import LSTMSudokuSolver
-from transformer_encoder_decoder_sudoku import TransformerSudokuSolver
-from t5_encoder_decoder_sudoku import MyT5SudokuSolver  
-from t5v2_encoder_decoder_sudoku import MyT5V2SudokuSolver  
-from t5v3_encoder_decoder_sudoku import MyT5V3SudokuSolver  
-from t5_encoder_sudoku import MyT5EncoderSudokuSolver 
 from gpt_encoder_sudoku import MyGPTEncoderSudokuSolver 
 from gpt_encoder_decoder_sudoku import MyGPTEncoderDecoderSudokuSolver 
 from latent_models import SudokuConvNet, EpsilonGreedyLatentModel, DeterministicLatentModel, LatentNLMModel
@@ -59,11 +53,7 @@ def get_model(args):
         rmodel = NLMModel(args)
     elif args.model == 'rrn':
         rmodel = SudokuRRNNet(args)
-    elif args.model in ['transformer_encoder_decoder_sudoku', 'lstm_encoder_decoder_sudoku', 
-            't5_encoder_decoder_sudoku',
-            't5v2_encoder_decoder_sudoku',
-            't5v3_encoder_decoder_sudoku',
-            't5_encoder_sudoku',
+    elif args.model in [
             'gpt_encoder_sudoku',
             'gpt_encoder_decoder_sudoku']:
         rmodel = SudokuEncoderDecoder(args)
@@ -416,26 +406,7 @@ class SudokuEncoderDecoder(nn.Module):
         self.args = args
         self.num_decoder_layers = args.sudoku_num_steps
         self.is_encoder_decoder = True
-        if args.model == 'lstm_encoder_decoder_sudoku':
-            self.sudoku_solver = LSTMSudokuSolver(
-                num_decoder_layers=args.sudoku_num_steps,
-                num_encoder_layers = args.sudoku_num_steps,
-            )
-        elif args.model == 'transformer_encoder_decoder_sudoku':
-            self.sudoku_solver = TransformerSudokuSolver(
-                num_decoder_layers=args.sudoku_num_steps,
-                num_encoder_layers = args.sudoku_num_steps,
-            )
-        elif args.model == 't5_encoder_decoder_sudoku':
-            self.sudoku_solver = MyT5SudokuSolver(args)
-        elif args.model == 't5v2_encoder_decoder_sudoku':
-            self.sudoku_solver = MyT5V2SudokuSolver(args)
-        elif args.model == 't5v3_encoder_decoder_sudoku':
-            self.sudoku_solver = MyT5V3SudokuSolver(args)
-        elif args.model == 't5_encoder_sudoku':
-            self.is_encoder_decoder = False 
-            self.sudoku_solver = MyT5EncoderSudokuSolver(args)
-        elif args.model == 'gpt_encoder_sudoku':
+        if args.model == 'gpt_encoder_sudoku':
             self.is_encoder_decoder = False 
             self.sudoku_solver =  MyGPTEncoderSudokuSolver(args)
         elif args.model == 'gpt_encoder_decoder_sudoku':
